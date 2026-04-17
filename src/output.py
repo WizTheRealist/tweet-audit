@@ -2,7 +2,7 @@ import csv
 import logging
 from pathlib import Path
 
-from evaluate_tweets import EvaluationSummary, FailedTweet, TweetEvaluation
+from evaluate import EvaluationSummary, FailedTweet, TweetEvaluation
 
 logger = logging.getLogger(__name__)
 
