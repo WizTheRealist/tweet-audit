@@ -51,7 +51,6 @@ def parse_tweets(tweets_js_path: Path, username: str) -> list[dict]:
             id_str = tweet["id_str"]
             full_text = tweet["full_text"]
         except (KeyError, TypeError):
-            # Skip malformed entries rather than crashing the whole run
             continue
  
         tweets.append({
