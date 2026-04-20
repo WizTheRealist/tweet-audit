@@ -8,9 +8,7 @@ from evaluate import evaluate_tweets
 from output import write_failed, write_flagged
 from parse import parse_tweets, parse_username
 
-# ---------------------------------------------------------------------------
 # Logging
-# ---------------------------------------------------------------------------
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,10 +17,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
 # CLI
-# ---------------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -52,10 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     return parser
 
-
-# ---------------------------------------------------------------------------
 # Config loading
-# ---------------------------------------------------------------------------
 
 def load_config(config_path: Path) -> dict:
     if not config_path.exists():
@@ -75,10 +67,7 @@ def load_config(config_path: Path) -> dict:
 
     return config
 
-
-# ---------------------------------------------------------------------------
 # Entry point
-# ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = build_parser()

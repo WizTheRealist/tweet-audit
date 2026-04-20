@@ -6,9 +6,7 @@ from evaluate import EvaluationSummary, FailedTweet, TweetEvaluation
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
 # CSV writers
-# ---------------------------------------------------------------------------
 
 FLAGGED_FIELDNAMES = ["tweet_url", "deleted"]
 FAILED_FIELDNAMES = ["tweet_url", "id_str", "error"]
