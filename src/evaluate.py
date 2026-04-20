@@ -1,35 +1,37 @@
+import json
 import logging
 import random
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
- 
+
 from google import genai
 from pydantic import BaseModel, Field
- 
+
 logger = logging.getLogger(__name__)
 
 ALIGNMENT_PROMPT = """
 You are reviewing tweets from a personal X (Twitter) archive.
 Flag any tweet that violates one or more of the following criteria:
- 
+
 1. Contains unprofessional or offensive language (insults, slurs, crude humour).
 2. Promotes or endorses crypto, NFTs, or get-rich-quick schemes.
 3. Expresses opinions that are factually wrong, harmful, or embarrassing in hindsight.
 4. Contains aggressive, dismissive, or disrespectful language toward any person or group.
 5. Is low-effort noise: meaningless filler, spam-like repetition, or content with no substance.
 6. Expresses explicit partisan support or opposition toward a political party, politician, or public figure (e.g., endorsements, campaigning, or strong political alignment).
- 
+
 Be conservative: only flag tweets that clearly violate a criterion.
 When in doubt, do NOT flag.
- 
+
 Tweets to evaluate (JSON array):
 {tweets_json}
- 
+
 Return a JSON object matching the schema exactly. One result per tweet, in the same order.
 """.strip()
 
-# Pydantic models to validate structure
+# Pydantic models
 class TweetEvaluation(BaseModel):
     url: str = Field(description="The tweet URL, copied exactly from the input.")
     flagged: bool = Field(description="True if the tweet violates any alignment criterion.")
@@ -37,54 +39,72 @@ class TweetEvaluation(BaseModel):
         default=None,
         description="Brief explanation of why the tweet was flagged. Null if not flagged.",
     )
- 
+
 class BatchEvaluation(BaseModel):
     results: list[TweetEvaluation] = Field(
         description="One evaluation per tweet, in the same order as the input."
     )
 
-
-# Retry / Backoff helpers
-INITIAL_BACKOFF = 1.0   # seconds
+# Retry / backoff
+INITIAL_BACKOFF = 1.0
 BACKOFF_MULTIPLIER = 3
-JITTER_RANGE = 0.5      # ± seconds
+JITTER_RANGE = 0.5
 MAX_RETRIES = 3
 
+# Rate limiting
+REQUESTS_PER_WINDOW = 15
+WINDOW_SECONDS = 60
+
+
 def _backoff_seconds(attempt: int) -> float:
-    """Exponential backoff with jitter. attempt is 0-indexed."""
     delay = INITIAL_BACKOFF * (BACKOFF_MULTIPLIER ** attempt)
     jitter = random.uniform(-JITTER_RANGE, JITTER_RANGE)
     return max(0.0, delay + jitter)
 
-# Core Evaluation Logic
+
 @dataclass
 class FailedTweet:
     url: str
     id_str: str
     error: str
- 
- 
+
+
 @dataclass
 class EvaluationSummary:
     results: list[TweetEvaluation] = field(default_factory=list)
     failed: list[FailedTweet] = field(default_factory=list)
- 
- 
+
+
+# Checkpoint helpers
+
+def _load_checkpoint(checkpoint_path: Path) -> set[str]:
+    """Return the set of tweet IDs already evaluated in a previous run."""
+    if not checkpoint_path.exists():
+        return set()
+    try:
+        data = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        return set(data.get("evaluated_ids", []))
+    except Exception as exc:
+        logger.warning("Could not read checkpoint file, starting fresh. Error: %s", exc)
+        return set()
+
+
+def _save_checkpoint(checkpoint_path: Path, evaluated_ids: set[str]) -> None:
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_path.write_text(
+        json.dumps({"evaluated_ids": list(evaluated_ids)}, indent=2),
+        encoding="utf-8",
+    )
+
+
 def _call_gemini(client: genai.Client, tweets: list[dict]) -> list[TweetEvaluation]:
-    """
-    Single Gemini API call for a list of tweets.
-    Returns a list of TweetEvaluation objects.
-    Raises on any API or validation error.
-    """
-    import json
- 
     tweets_json = json.dumps(
         [{"url": t["url"], "text": t["full_text"]} for t in tweets],
         ensure_ascii=False,
         indent=2,
     )
     prompt = ALIGNMENT_PROMPT.format(tweets_json=tweets_json)
- 
+
     response = client.models.generate_content(
         model="gemini-2.5-flash-lite",
         contents=prompt,
@@ -93,22 +113,18 @@ def _call_gemini(client: genai.Client, tweets: list[dict]) -> list[TweetEvaluati
             "response_json_schema": BatchEvaluation.model_json_schema(),
         },
     )
- 
+
     batch = BatchEvaluation.model_validate_json(response.text)
     return batch.results
- 
- 
+
+
 def _evaluate_with_retry(
     client: genai.Client,
     tweets: list[dict],
     retries: int = MAX_RETRIES,
 ) -> list[TweetEvaluation]:
-    """
-    Attempt to evaluate a batch, retrying with exponential backoff on failure.
-    Raises the last exception if all retries are exhausted.
-    """
     last_exc: Exception | None = None
- 
+
     for attempt in range(retries):
         try:
             return _call_gemini(client, tweets)
@@ -125,25 +141,19 @@ def _evaluate_with_retry(
                 exc,
             )
             time.sleep(wait)
- 
+
     raise last_exc  # type: ignore[misc]
- 
- 
+
+
 def _evaluate_batch(
     client: genai.Client,
     tweets: list[dict],
     summary: EvaluationSummary,
 ) -> None:
-    """
-    Evaluate a batch with progressive splitting on repeated failure:
-      full batch → halved chunks → individual tweets
- 
-    Results and failures are appended to `summary` in place.
-    """
     if not tweets:
         return
- 
-    # Attempt 1: full batch with retries
+
+    # Attempt 1: full batch
     try:
         results = _evaluate_with_retry(client, tweets)
         summary.results.extend(results)
@@ -155,13 +165,13 @@ def _evaluate_batch(
             len(tweets),
             exc,
         )
- 
-    # Attempt 2: split into halves
+
+    # Attempt 2: halves
     if len(tweets) > 1:
         mid = len(tweets) // 2
         halves = [tweets[:mid], tweets[mid:]]
         still_failing: list[dict] = []
- 
+
         for half in halves:
             try:
                 results = _evaluate_with_retry(client, half)
@@ -174,9 +184,9 @@ def _evaluate_batch(
                     exc,
                 )
                 still_failing.extend(half)
- 
-        tweets = still_failing  # only the truly stubborn ones go to individual pass
- 
+
+        tweets = still_failing
+
     # Attempt 3: one by one
     for tweet in tweets:
         try:
@@ -196,48 +206,57 @@ def _evaluate_batch(
                     error=str(exc),
                 )
             )
- 
- 
-# Public interface
- 
+
+
 BATCH_SIZE = 50
- 
- 
+
+
 def evaluate_tweets(
     tweets: list[dict],
     api_key: str,
+    checkpoint_path: Path,
     batch_size: int = BATCH_SIZE,
 ) -> EvaluationSummary:
-    """
-    Evaluate all tweets against the alignment criteria using the Gemini API.
- 
-    Args:
-        tweets:     Output of parse_tweets.parse_tweets() — list of dicts
-                    with keys id_str, full_text, url.
-        api_key:    Gemini API key.
-        batch_size: How many tweets to send per API call (default 50).
- 
-    Returns:
-        EvaluationSummary with:
-            .results — list of TweetEvaluation (flagged and unflagged)
-            .failed  — list of FailedTweet for any tweets that couldn't be evaluated
-    """
     client = genai.Client(api_key=api_key)
     summary = EvaluationSummary()
- 
-    batches = [tweets[i : i + batch_size] for i in range(0, len(tweets), batch_size)]
+
+    # Skip tweets already evaluated in a previous run
+    evaluated_ids = _load_checkpoint(checkpoint_path)
+    remaining = [t for t in tweets if t["id_str"] not in evaluated_ids]
+
+    if evaluated_ids:
+        logger.info(
+            "Resuming from checkpoint: %d already evaluated, %d remaining.",
+            len(evaluated_ids),
+            len(remaining),
+        )
+
+    batches = [remaining[i : i + batch_size] for i in range(0, len(remaining), batch_size)]
     total = len(batches)
- 
-    logger.info("Starting evaluation: %d tweets across %d batches.", len(tweets), total)
- 
+
+    logger.info("Starting evaluation: %d tweets across %d batches.", len(remaining), total)
+
     for idx, batch in enumerate(batches, start=1):
+        # Pause every 15 requests to stay within the RPM limit
+        if idx > 1 and (idx - 1) % REQUESTS_PER_WINDOW == 0:
+            logger.info(
+                "Reached %d requests. Pausing %ds to respect rate limit...",
+                REQUESTS_PER_WINDOW,
+                WINDOW_SECONDS,
+            )
+            time.sleep(WINDOW_SECONDS)
+
         logger.info("Processing batch %d/%d (%d tweets)...", idx, total, len(batch))
         _evaluate_batch(client, batch, summary)
- 
+
+        # Save progress after each successful batch
+        evaluated_ids.update(t["id_str"] for t in batch)
+        _save_checkpoint(checkpoint_path, evaluated_ids)
+
     logger.info(
         "Evaluation complete. %d evaluated, %d failed.",
         len(summary.results),
         len(summary.failed),
     )
- 
+
     return summary

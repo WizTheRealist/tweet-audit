@@ -8,8 +8,6 @@ from evaluate import evaluate_tweets
 from output import write_failed, write_flagged
 from parse import parse_tweets, parse_username
 
-# Logging
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -17,7 +15,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# CLI
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -47,7 +44,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     return parser
 
-# Config loading
 
 def load_config(config_path: Path) -> dict:
     if not config_path.exists():
@@ -67,7 +63,6 @@ def load_config(config_path: Path) -> dict:
 
     return config
 
-# Entry point
 
 def main() -> None:
     parser = build_parser()
@@ -76,7 +71,6 @@ def main() -> None:
     archive_dir: Path = args.archive
     output_dir: Path = args.output
 
-    # --- Validate archive directory ---
     tweets_js = archive_dir / "tweets.js"
     account_js = archive_dir / "account.js"
 
@@ -85,11 +79,10 @@ def main() -> None:
             logger.error("Expected archive file not found: %s", path)
             sys.exit(1)
 
-    # --- Load config ---
     config = load_config(args.config)
     api_key: str = config["gemini_api_key"]
 
-    # --- Stage 1: Parse ---
+    # Stage 1: Parse
     print("\n── Stage 1/3: Parsing archive ──────────────────────────")
     try:
         username = parse_username(account_js)
@@ -100,11 +93,12 @@ def main() -> None:
 
     print(f"  ✓ Found {len(tweets):,} tweets for @{username}")
 
-    # --- Stage 2: Evaluate ---
+    # Stage 2: Evaluate
     print("\n── Stage 2/3: Evaluating with Gemini ───────────────────")
-    print(f"  Sending tweets in batches of 50 — this may take a while...\n")
+    print("  Sending tweets in batches of 50 — this may take a while...\n")
 
-    summary = evaluate_tweets(tweets, api_key=api_key)
+    checkpoint_path = output_dir / "checkpoint.json"
+    summary = evaluate_tweets(tweets, api_key=api_key, checkpoint_path=checkpoint_path)
 
     flagged_count = sum(1 for r in summary.results if r.flagged)
     failed_count = len(summary.failed)
@@ -114,7 +108,7 @@ def main() -> None:
     if failed_count:
         print(f"  ⚠ Failed:   {failed_count:,} (could not be evaluated)")
 
-    # --- Stage 3: Write output ---
+    # Stage 3: Write output
     print("\n── Stage 3/3: Writing output ───────────────────────────")
 
     flagged_path = output_dir / "flagged.csv"
@@ -123,7 +117,6 @@ def main() -> None:
     written = write_flagged(summary, flagged_path)
     write_failed(summary, failed_path)
 
-    # --- Summary ---
     print("\n── Done ─────────────────────────────────────────────────")
     if written:
         print(f"  Flagged tweets → {flagged_path}")
