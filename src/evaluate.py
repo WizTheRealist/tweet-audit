@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from google import genai
+from google.api_core import exceptions as google_exceptions
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -45,21 +46,27 @@ class BatchEvaluation(BaseModel):
         description="One evaluation per tweet, in the same order as the input."
     )
 
-# Retry / backoff
+# Backoff settings for transient errors (timeouts, network blips)
 INITIAL_BACKOFF = 1.0
 BACKOFF_MULTIPLIER = 3
 JITTER_RANGE = 0.5
 MAX_RETRIES = 3
 
-# Rate limiting
-REQUESTS_PER_WINDOW = 15
-WINDOW_SECONDS = 60
+# Backoff settings for 429 quota errors
+QUOTA_INITIAL_BACKOFF = 30.0
+QUOTA_BACKOFF_MULTIPLIER = 2
+QUOTA_MAX_RETRIES = 5
 
 
 def _backoff_seconds(attempt: int) -> float:
     delay = INITIAL_BACKOFF * (BACKOFF_MULTIPLIER ** attempt)
     jitter = random.uniform(-JITTER_RANGE, JITTER_RANGE)
     return max(0.0, delay + jitter)
+
+
+def _quota_backoff_seconds(attempt: int) -> float:
+    # 30s, 60s, 120s, 240s, 480s — no jitter, predictable spacing
+    return QUOTA_INITIAL_BACKOFF * (QUOTA_BACKOFF_MULTIPLIER ** attempt)
 
 
 @dataclass
@@ -78,7 +85,6 @@ class EvaluationSummary:
 # Checkpoint helpers
 
 def _load_checkpoint(checkpoint_path: Path) -> set[str]:
-    """Return the set of tweet IDs already evaluated in a previous run."""
     if not checkpoint_path.exists():
         return set()
     try:
@@ -124,10 +130,28 @@ def _evaluate_with_retry(
     retries: int = MAX_RETRIES,
 ) -> list[TweetEvaluation]:
     last_exc: Exception | None = None
+    quota_attempt = 0
 
     for attempt in range(retries):
         try:
             return _call_gemini(client, tweets)
+        except google_exceptions.ResourceExhausted as exc:
+            # 429 — use longer backoff and don't count against normal retries
+            last_exc = exc
+            wait = _quota_backoff_seconds(quota_attempt)
+            quota_attempt += 1
+            logger.warning(
+                "Quota exceeded (429) for batch of %d tweets. "
+                "Waiting %.0fs before retrying. Error: %s",
+                len(tweets),
+                wait,
+                exc,
+            )
+            time.sleep(wait)
+            if quota_attempt >= QUOTA_MAX_RETRIES:
+                raise
+            # Don't increment attempt — quota errors don't burn normal retries
+            continue
         except Exception as exc:
             last_exc = exc
             wait = _backoff_seconds(attempt)
@@ -208,15 +232,19 @@ def _evaluate_batch(
             )
 
 
-BATCH_SIZE = 50
+BATCH_SIZE = 100
 
 
 def evaluate_tweets(
     tweets: list[dict],
     api_key: str,
     checkpoint_path: Path,
+    flagged_path: Path,
+    failed_path: Path,
     batch_size: int = BATCH_SIZE,
 ) -> EvaluationSummary:
+    from output import append_flagged, append_failed
+
     client = genai.Client(api_key=api_key)
     summary = EvaluationSummary()
 
@@ -237,19 +265,20 @@ def evaluate_tweets(
     logger.info("Starting evaluation: %d tweets across %d batches.", len(remaining), total)
 
     for idx, batch in enumerate(batches, start=1):
-        # Pause every 15 requests to stay within the RPM limit
-        if idx > 1 and (idx - 1) % REQUESTS_PER_WINDOW == 0:
-            logger.info(
-                "Reached %d requests. Pausing %ds to respect rate limit...",
-                REQUESTS_PER_WINDOW,
-                WINDOW_SECONDS,
-            )
-            time.sleep(WINDOW_SECONDS)
-
         logger.info("Processing batch %d/%d (%d tweets)...", idx, total, len(batch))
-        _evaluate_batch(client, batch, summary)
 
-        # Save progress after each successful batch
+        batch_summary = EvaluationSummary()
+        _evaluate_batch(client, batch, batch_summary)
+
+        # Write this batch's results to CSV immediately
+        append_flagged(batch_summary, flagged_path)
+        append_failed(batch_summary, failed_path)
+
+        # Accumulate into the overall summary
+        summary.results.extend(batch_summary.results)
+        summary.failed.extend(batch_summary.failed)
+
+        # Save checkpoint
         evaluated_ids.update(t["id_str"] for t in batch)
         _save_checkpoint(checkpoint_path, evaluated_ids)
 
