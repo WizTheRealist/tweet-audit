@@ -4,7 +4,7 @@ import logging
 import sys
 from pathlib import Path
 
-from evaluate_tweets import evaluate_tweets
+from evaluate import evaluate_tweets
 from output import write_failed, write_flagged
 from parse import parse_tweets, parse_username
 

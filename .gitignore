@@ -3,3 +3,5 @@ gemini-test.py
 __pycache__
 config.json
 run.txt
+output/checkpoint.json
+output/flagged.csv
