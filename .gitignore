@@ -2,3 +2,4 @@ gemini-test.py
 .myenv
 __pycache__
 config.json
+run.txt

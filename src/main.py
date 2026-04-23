@@ -4,7 +4,7 @@ import logging
 import sys
 from pathlib import Path
 
-from evaluate import evaluate_tweets
+from evaluate_tweets import evaluate_tweets
 from output import write_failed, write_flagged
 from parse import parse_tweets, parse_username
 
@@ -95,10 +95,19 @@ def main() -> None:
 
     # Stage 2: Evaluate
     print("\n── Stage 2/3: Evaluating with Gemini ───────────────────")
-    print("  Sending tweets in batches of 50 — this may take a while...\n")
+    print("  Sending tweets in batches of 100 — this may take a while...\n")
 
     checkpoint_path = output_dir / "checkpoint.json"
-    summary = evaluate_tweets(tweets, api_key=api_key, checkpoint_path=checkpoint_path)
+    flagged_path = output_dir / "flagged.csv"
+    failed_path = output_dir / "failed.csv"
+
+    summary = evaluate_tweets(
+        tweets,
+        api_key=api_key,
+        checkpoint_path=checkpoint_path,
+        flagged_path=flagged_path,
+        failed_path=failed_path,
+    )
 
     flagged_count = sum(1 for r in summary.results if r.flagged)
     failed_count = len(summary.failed)
@@ -108,17 +117,11 @@ def main() -> None:
     if failed_count:
         print(f"  ⚠ Failed:   {failed_count:,} (could not be evaluated)")
 
-    # Stage 3: Write output
-    print("\n── Stage 3/3: Writing output ───────────────────────────")
-
-    flagged_path = output_dir / "flagged.csv"
-    failed_path = output_dir / "failed.csv"
-
-    written = write_flagged(summary, flagged_path)
-    write_failed(summary, failed_path)
-
+    # Stage 3: Summary
     print("\n── Done ─────────────────────────────────────────────────")
-    if written:
+    write_flagged(summary, flagged_path)
+    write_failed(summary, failed_path)
+    if flagged_count:
         print(f"  Flagged tweets → {flagged_path}")
     else:
         print("  No tweets were flagged.")

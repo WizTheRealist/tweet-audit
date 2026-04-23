@@ -2,69 +2,78 @@ import csv
 import logging
 from pathlib import Path
 
-from evaluate import EvaluationSummary, FailedTweet, TweetEvaluation
+from evaluate_tweets import EvaluationSummary, FailedTweet, TweetEvaluation
 
 logger = logging.getLogger(__name__)
-
-# CSV writers
 
 FLAGGED_FIELDNAMES = ["tweet_url", "deleted"]
 FAILED_FIELDNAMES = ["tweet_url", "id_str", "error"]
 
 
-def write_flagged(summary: EvaluationSummary, output_path: Path) -> int:
-    """
-    Write flagged tweets to a CSV file for manual review and deletion.
+def _write_csv(path: Path, fieldnames: list[str], rows: list[dict]) -> None:
+    """Write rows to a CSV, creating with header if new, appending if it already exists."""
+    if not rows:
+        return
 
-    Columns:
-        tweet_url — direct link to the tweet on X
-        deleted   — manual tracking flag, always initialised to 'false'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    file_exists = path.exists()
 
-    Returns the number of flagged tweets written.
-    """
-    flagged: list[TweetEvaluation] = [r for r in summary.results if r.flagged]
+    with path.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerows(rows)
 
+
+def append_flagged(summary: EvaluationSummary, output_path: Path) -> int:
+    """Append flagged tweets from this batch to the CSV."""
+    flagged = [r for r in summary.results if r.flagged]
     if not flagged:
-        logger.info("No tweets were flagged. No output file written.")
         return 0
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_csv(
+        output_path,
+        FLAGGED_FIELDNAMES,
+        [{"tweet_url": r.url, "deleted": "false"} for r in flagged],
+    )
+    logger.info("Appended %d flagged tweet(s) to %s.", len(flagged), output_path)
+    return len(flagged)
 
-    with output_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=FLAGGED_FIELDNAMES)
-        writer.writeheader()
-        writer.writerows({"tweet_url": r.url, "deleted": "false"} for r in flagged)
 
-    logger.info("Wrote %d flagged tweet(s) to %s.", len(flagged), output_path)
+def append_failed(summary: EvaluationSummary, output_path: Path) -> int:
+    """Append failed tweets from this batch to the CSV."""
+    if not summary.failed:
+        return 0
+
+    _write_csv(
+        output_path,
+        FAILED_FIELDNAMES,
+        [{"tweet_url": ft.url, "id_str": ft.id_str, "error": ft.error} for ft in summary.failed],
+    )
+    logger.warning(
+        "Appended %d failed tweet(s) to %s.",
+        len(summary.failed),
+        output_path,
+    )
+    return len(summary.failed)
+
+
+def write_flagged(summary: EvaluationSummary, output_path: Path) -> int:
+    """Write all flagged tweets to CSV from scratch. Used for end-of-run summary reporting."""
+    flagged = [r for r in summary.results if r.flagged]
+    if not flagged:
+        logger.info("No tweets were flagged.")
+        return 0
+    logger.info("%d flagged tweet(s) written to %s.", len(flagged), output_path)
     return len(flagged)
 
 
 def write_failed(summary: EvaluationSummary, output_path: Path) -> int:
-    """
-    Write tweets that could not be evaluated to a separate CSV for inspection.
-
-    Columns:
-        tweet_url — direct link to the tweet on X
-        id_str    — tweet ID
-        error     — the last error message from the Gemini API
-
-    Returns the number of failed tweets written. Writes nothing if there are none.
-    """
+    """Report failed tweet count. Used for end-of-run summary reporting."""
     if not summary.failed:
         return 0
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with output_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=FAILED_FIELDNAMES)
-        writer.writeheader()
-        writer.writerows(
-            {"tweet_url": ft.url, "id_str": ft.id_str, "error": ft.error}
-            for ft in summary.failed
-        )
-
     logger.warning(
-        "%d tweet(s) could not be evaluated. Written to %s for inspection.",
+        "%d tweet(s) could not be evaluated. See %s for details.",
         len(summary.failed),
         output_path,
     )
